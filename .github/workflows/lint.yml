@@ -1,0 +1,57 @@
+name: Lint and Documentation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GNUSTO_ENGINE_PATH: ${{ github.workspace }}/.context/engine
+
+jobs:
+  swift-format-lint:
+    runs-on: ubuntu-24.04-arm
+    container: swift:6.3.3-noble
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The checked-in configuration is independent of command-only DocC tooling.
+      - name: Lint (strict)
+        run: |
+          swift-format --version
+          swift-format lint --strict --parallel --recursive --configuration .swift-format Sources Tests Package.swift
+
+  documentation:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reviewed engine cutover for this coordinated prerelease integration.
+      - name: Checkout Gnusto
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: HeirloomLogic/Gnusto
+          ref: 9f70768ac5896952c7bb1260d2a89588ad4e8dc4
+          path: .context/engine
+          persist-credentials: false
+      - name: Enable documentation tooling
+        run: |
+          touch .dev-tooling
+          swift package --manifest-cache none resolve
+      - name: Build documentation
+        run: |
+          swift package --manifest-cache none --allow-writing-to-directory .docs-build \
+            generate-documentation --target GnustoTerminal \
+            --output-path .docs-build --warnings-as-errors

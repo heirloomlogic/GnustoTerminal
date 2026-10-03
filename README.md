@@ -40,3 +40,17 @@ xcrun swift-format lint --strict --parallel --recursive --configuration .swift-f
 The development override uses the current engine checkout, including uncommitted edits. Generated build packages must resolve their game and terminal dependencies against that same engine identity. The manifest's default `main` branch dependency is a prerelease integration reference, not an immutable release pin; replace it with the coordinated published version during release handoff.
 
 The suite exercises launcher policy, key decoding, paste folding, completion, word boundaries, status-bar widths and history persistence without taking over a live terminal. Raw-mode restoration, resize rendering and Ctrl-C confirmation still require live terminal acceptance.
+
+## CI and documentation
+
+CI checks out a reviewed Gnusto integration revision and supplies `GNUSTO_ENGINE_PATH`; it does not imply that the packages are released or compatible with their respective default branches. Linux uses Swift 6.3.3 with the same backend and prebuilt policy as Gnusto. macOS tests run on the macOS 26 runner. The dependency-graph check runs without maintainer tooling and rejects DocC or Persnicket in the library graph.
+
+The checked-in `.swift-format` configuration supports strict lint without attaching a build-tool plugin to the library. Documentation uses its own maintainer sentinel:
+
+```sh
+touch .dev-tooling
+GNUSTO_ENGINE_PATH=/absolute/path/to/Gnusto swift package --manifest-cache none resolve
+GNUSTO_ENGINE_PATH=/absolute/path/to/Gnusto swift package --manifest-cache none --allow-writing-to-directory .docs-build generate-documentation --target GnustoTerminal --output-path .docs-build --warnings-as-errors
+```
+
+Remove `.dev-tooling` and use `--manifest-cache none` when checking the published dependency graph. Ordinary consumers resolve only the engine dependency; the command-only DocC plugin is available solely in a maintainer checkout with the sentinel present. Generated build packages retain prerelease dependency state in their ignored `Package.resolved` files. Release acceptance replaces branch requirements with compatible immutable versions and builds a fresh author package against those versions.

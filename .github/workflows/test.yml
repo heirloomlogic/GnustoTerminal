@@ -1,0 +1,77 @@
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  GNUSTO_ENGINE_PATH: ${{ github.workspace }}/.context/engine
+
+jobs:
+  test-linux:
+    runs-on: ubuntu-24.04-arm
+    container: swift:6.3.3-noble
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reviewed engine cutover for this coordinated prerelease integration.
+      - name: Checkout Gnusto
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: HeirloomLogic/Gnusto
+          ref: 9f70768ac5896952c7bb1260d2a89588ad4e8dc4
+          path: .context/engine
+          persist-credentials: false
+      - name: Trust the workspaces
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$GNUSTO_ENGINE_PATH"
+      - name: Verify the published dependency graph
+        run: |
+          set -eu
+          test ! -e .dev-tooling
+          swift package --manifest-cache none show-dependencies --format json > "$RUNNER_TEMP/dependencies.json"
+          cat "$RUNNER_TEMP/dependencies.json"
+          if grep -qiE 'swift-docc|Persnicket' "$RUNNER_TEMP/dependencies.json"; then
+            echo "error: maintainer tooling entered the terminal library dependency graph" >&2
+            exit 1
+          fi
+      # Match Gnusto's Linux backend and explicit prebuilt policy.
+      - name: Test (Debug)
+        run: swift test --build-system swiftbuild --disable-experimental-prebuilts
+      - name: Test (Release)
+        if: github.event_name == 'push'
+        run: swift test -c release --build-system swiftbuild --disable-experimental-prebuilts
+      - name: Build without Playtest
+        run: swift build --disable-default-traits --scratch-path .build-notraits --build-system swiftbuild --disable-experimental-prebuilts
+
+  test-macos:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reviewed engine cutover for this coordinated prerelease integration.
+      - name: Checkout Gnusto
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: HeirloomLogic/Gnusto
+          ref: 9f70768ac5896952c7bb1260d2a89588ad4e8dc4
+          path: .context/engine
+          persist-credentials: false
+      - name: Test (Debug)
+        run: swift test
+      - name: Build without Playtest
+        run: swift build --disable-default-traits --scratch-path .build-notraits

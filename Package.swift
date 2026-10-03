@@ -2,6 +2,16 @@
 import Foundation
 import PackageDescription
 
+// Command-only documentation tooling stays out of the published library graph.
+// The sentinel is maintainer-owned; disable manifest caching when toggling it.
+let packageDir = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let isDevBuild = FileManager.default.fileExists(
+    atPath: packageDir.appendingPathComponent(".dev-tooling").path)
+let devDependencies: [Package.Dependency] =
+    isDevBuild
+    ? [.package(url: "https://github.com/apple/swift-docc-plugin", from: "1.5.0")]
+    : []
+
 // Forward the development server trait through the complete dependency graph.
 let forwarded: Set<Package.Dependency.Trait> = [
     .trait(name: "Playtest", condition: .when(traits: ["Playtest"]))
@@ -24,7 +34,7 @@ let package = Package(
         .trait(name: "Playtest", description: "Enable Gnusto MCP launch."),
         .default(enabledTraits: ["Playtest"]),
     ],
-    dependencies: [engineDependency],
+    dependencies: [engineDependency] + devDependencies,
     targets: [
         .target(
             name: "GnustoTerminal",
