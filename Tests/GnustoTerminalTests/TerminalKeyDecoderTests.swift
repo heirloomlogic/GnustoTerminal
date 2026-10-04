@@ -109,10 +109,27 @@ struct TerminalKeyDecoderTests {
         #expect(decode("\u{1B}[Za") == [.character("a")])  // and decoding resumes
     }
 
-    @Test func bareEscapeIsSwallowedAlongWithTheByteAfterIt() {
-        #expect(decode("\u{1B}") == [])
+    @Test func bareEscapeIsAKeyAndUnknownMetaIsDiscarded() {
+        #expect(decode("\u{1B}") == [.escape])
         // The byte that proves it wasn't a CSI introducer is consumed with it.
         #expect(decode("\u{1B}ab") == [.character("b")])
+    }
+
+    @Test func mouseWheelDecodesSeparatelyFromHistoryArrows() {
+        #expect(decode("\u{1B}[<64;20;10M") == [.scrollUp])
+        #expect(decode("\u{1B}[<65;20;10M") == [.scrollDown])
+        #expect(decode("\u{1B}[<80;200;100M") == [.scrollUp])  // Ctrl-wheel
+        #expect(decode([0x1B, 0x5B, 0x4D, 96, 52, 42]) == [.scrollUp])
+        #expect(decode([0x1B, 0x5B, 0x4D, 97, 52, 42]) == [.scrollDown])
+        #expect(decode("\u{1B}[A\u{1B}[B") == [.historyPrev, .historyNext])
+    }
+
+    @Test func mouseClicksReleasesAndInvalidReportsDoNotTypeCoordinates() {
+        #expect(decode("\u{1B}[<0;20;10Mlook") == decode("look"))
+        #expect(decode("\u{1B}[<64;20;10mlook") == decode("look"))
+        #expect(decode("\u{1B}[<64;0;10Mlook") == decode("look"))
+        #expect(decode("\u{1B}[<64;;10Mlook") == decode("look"))
+        #expect(decode("\u{1B}[<64;20;") == [])
     }
 
     @Test func sequenceTruncatedBeforeItsIntroducerIsDiscarded() {

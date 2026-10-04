@@ -23,6 +23,8 @@ struct KeyDecoder {
         case deleteWordBack, deleteWordForward, deleteToStart
         case historyPrev, historyNext
         case pageUp, pageDown
+        case scrollUp, scrollDown
+        case escape
         case eof, interrupt
         /// A bracketed paste, delivered whole and verbatim. Arriving as one key is
         /// what keeps its newlines, tabs and control bytes from being decoded as
@@ -80,7 +82,7 @@ struct KeyDecoder {
                 case 0x7F, 0x08: return .backspace
                 case 0x1B:
                     if let key = escapeSequence() { return key }
-                    continue  // lone or unrecognized ESC; move on to the next key
+                    continue  // unrecognized escape sequence
                 case 0x00..<0x20:
                     continue  // ignore other control bytes
                 default:
@@ -92,9 +94,9 @@ struct KeyDecoder {
     }
 
     /// Parses a CSI escape sequence (arrows, Home/End, Delete, Page keys).
-    /// Returns `nil` for a bare or unrecognized ESC, which the caller swallows.
+    /// A bare ESC times out as its own key; unknown sequences are swallowed.
     private func escapeSequence() -> Key? {
-        guard case .byte(let b1) = nextByte() else { return nil }
+        guard case .byte(let b1) = nextByte() else { return .escape }
         guard b1 == 0x5B || b1 == 0x4F else {
             // Not a CSI/SS3 introducer, so this is a Meta/Alt prefix (Terminal's
             // "Use Option as Meta", readline's M-…): the byte *is* the key. Only
@@ -116,6 +118,11 @@ struct KeyDecoder {
         case 0x44: return .left
         case 0x48: return .home  // ESC[H / ESC OH
         case 0x46: return .end  // ESC[F / ESC OF
+        case 0x3C: return sgrMouse()  // ESC [ < button ; column ; row M/m
+        case 0x4D:  // legacy mouse: ESC [ M followed by three encoded bytes
+            guard case .byte(let button) = nextByte() else { return nil }
+            guard case .byte = nextByte(), case .byte = nextByte() else { return nil }
+            return button >= 32 ? wheel(button: Int(button) - 32) : nil
         case 0x30...0x39:  // numeric parameter(s), ended by the CSI final byte
             var param = String(UnicodeScalar(b2))
             while case .byte(let n) = nextByte() {
@@ -136,6 +143,35 @@ struct KeyDecoder {
             return decodeCSI(param: param, final: 0x7E)
         default:
             return nil
+        }
+    }
+
+    /// Consume the whole report, including clicks we do not handle, so its
+    /// coordinates cannot leak into the command buffer. Bound malformed input.
+    private func sgrMouse() -> Key? {
+        var parameters = ""
+        for _ in 0..<64 {
+            guard case .byte(let byte) = nextByte() else { return nil }
+            if byte >= 0x40, byte <= 0x7E {
+                guard byte == 0x4D else { return nil }  // ignore releases
+                let fields = parameters.split(separator: ";", omittingEmptySubsequences: false)
+                guard fields.count == 3, let button = Int(fields[0]),
+                    let column = Int(fields[1]), let row = Int(fields[2]),
+                    column > 0, row > 0
+                else { return nil }
+                return wheel(button: button)
+            }
+            parameters.append(Character(UnicodeScalar(byte)))
+        }
+        return nil
+    }
+
+    /// Wheel reports carry modifier bits as well as the button code.
+    private func wheel(button: Int) -> Key? {
+        switch button & ~28 {
+        case 64: return .scrollUp
+        case 65: return .scrollDown
+        default: return nil
         }
     }
 

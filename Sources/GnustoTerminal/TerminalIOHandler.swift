@@ -38,7 +38,7 @@ private func gnustoEmergencyRestore() {
     // allocates becomes a stdlib implementation detail — not a bet worth making
     // inside a signal handler. Keep it a local, too: a file-scope `let` would
     // reintroduce `swift_once`.) Modes are dropped in the order they were set.
-    let reset: StaticString = "\u{1B}[?2004l\u{1B}[?1049l\u{1B}[?25h"
+    let reset: StaticString = "\u{1B}[?1006l\u{1B}[?1000l\u{1B}[?2004l\u{1B}[?1049l\u{1B}[?25h"
     reset.withUTF8Buffer { _ = write(STDOUT_FILENO, $0.baseAddress, $0.count) }
 }
 
@@ -57,7 +57,7 @@ private func gnustoFatalSignalHandler(_ sig: Int32) {
 /// A full-screen, Infocom-style terminal front end: a fixed status bar (room,
 /// score, turns) above a story window that re-wraps its entire transcript to
 /// the window width — so resizing the terminal reflows the text — with its own
-/// line editor (arrow keys, history) and PageUp/PageDown scrollback.
+/// line editor (arrow keys, history) and mouse/PageUp/PageDown scrollback.
 ///
 /// Chosen automatically by `TerminalLaunch` when stdin and stdout are both a TTY;
 /// piped or redirected runs fall back to `ConsoleIOHandler` so transcripts and
@@ -89,6 +89,8 @@ public final class TerminalIOHandler: IOHandler {
         var completions = CompletionCandidates()
         /// Lines scrolled up from the live bottom; 0 pins to the newest text.
         var scrollOffset = 0
+        /// The opening stays at its beginning until the first input read.
+        var hasReadLine = false
         /// Lines a bracketed paste submitted that `readLine` hasn't returned yet.
         /// The REPL runs one command per call, so a pasted walkthrough is folded
         /// once and handed over a line at a time. The tty input buffer used to do
@@ -197,7 +199,9 @@ public final class TerminalIOHandler: IOHandler {
     }
 
     /// Runs the raw-mode line editor until the player submits a line, presses
-    /// Ctrl-D on an empty line (EOF), or Ctrl-C (quit). Returns the submitted
+    /// Ctrl-D on an empty line (EOF), or Ctrl-C (quit). Ctrl-C and Escape cancel
+    /// a save/restore filename prompt; Escape also cancels quit confirmation.
+    /// Returns the submitted
     /// line as `.line`, `.quit` on a confirmed Ctrl-C, or `nil` (EOF) to end
     /// the game.
     public func readLine(prompt: String) -> Input? {
@@ -206,7 +210,10 @@ public final class TerminalIOHandler: IOHandler {
         // while the lines before it are submitted one `readLine` at a time. Every
         // way out of this method either submits the buffer or clears it, so the
         // only thing that can survive into the next call is a paste still draining.
-        box.withLock { $0.prompt = prompt }
+        box.withLock {
+            $0.prompt = prompt
+            $0.hasReadLine = true
+        }
         render()
 
         // History browsing state, local to this line. `historyCursor` counts
@@ -228,6 +235,15 @@ public final class TerminalIOHandler: IOHandler {
             }
 
             guard let key = nextKey() else { continue }  // resize or timeout; loop
+
+            // Editing or recalling a command brings its prompt back on screen.
+            // Scroll gestures keep the viewport independent of the editor.
+            switch key {
+            case .pageUp, .pageDown, .scrollUp, .scrollDown, .interrupt, .eof, .escape:
+                break
+            default:
+                box.withLock { $0.scrollOffset = 0 }
+            }
 
             // The editing cases only mutate state; the single `render()` at the
             // foot of the loop repaints. The control-flow cases (`enter`,
@@ -252,14 +268,14 @@ public final class TerminalIOHandler: IOHandler {
                 continue  // nothing changed; no repaint
 
             case .interrupt:
+                if cancelFilenamePrompt() { return .line("") }
                 // Ctrl-C: confirm, then signal a quit *intent* rather than
                 // killing the process — the REPL routes `.quit` through
                 // `GameWorld.requestQuit()`, so the engine prints its epilogue
                 // (unless the game has already ended, in which case that turn
                 // already printed it and this exits silently) and the
                 // terminal restores cleanly on the way out. Signaling the
-                // intent (not the editable "quit" verb word) means the quit
-                // lands even while a save/restore prompt is pending, and can't
+                // intent (not the editable "quit" verb word) means it can't
                 // drift if a game redefines the verb.
                 if confirmQuit() {
                     // Abandoning the line, so drop it — the buffer now persists
@@ -274,16 +290,21 @@ public final class TerminalIOHandler: IOHandler {
                 render()
                 continue
 
+            case .escape:
+                if cancelFilenamePrompt() { return .line("") }
+                box.withLock {
+                    $0.input = ""
+                    $0.cursor = 0
+                    $0.pendingLines.removeAll()
+                    $0.scrollOffset = 0
+                }
+
             case .tab:
                 box.withLock { st in
                     let outcome = Self.complete(
                         input: st.input, cursor: st.cursor, candidates: st.completions)
                     st.input = outcome.newInput
                     st.cursor = outcome.newCursor
-                    if !outcome.listing.isEmpty {
-                        st.transcript.append(Self.formatCandidateListing(outcome.listing))
-                        st.scrollOffset = 0
-                    }
                 }
 
             case .paste(let text):
@@ -378,6 +399,12 @@ public final class TerminalIOHandler: IOHandler {
 
             case .pageDown:
                 box.withLock { $0.scrollOffset = max(0, $0.scrollOffset - self.pageStep()) }
+
+            case .scrollUp:
+                box.withLock { $0.scrollOffset += 3 }
+
+            case .scrollDown:
+                box.withLock { $0.scrollOffset = max(0, $0.scrollOffset - 3) }
             }
             render()
         }
@@ -436,8 +463,9 @@ public final class TerminalIOHandler: IOHandler {
 
         // Alternate screen buffer, then bracketed paste — which wraps pasted text
         // in `ESC[200~`/`ESC[201~` so the editor can tell it from typing. Both are
-        // dropped again by `gnustoEmergencyRestore`, on every exit path.
-        emit("\u{1B}[?1049h\u{1B}[?2004h")
+        // dropped again by `gnustoEmergencyRestore`, on every exit path. Mouse
+        // reporting keeps wheel input separate from alternate-screen arrows.
+        emit("\u{1B}[?1049h\u{1B}[?2004h\u{1B}[?1000h\u{1B}[?1006h")
     }
 
     /// Sets one entry of the `c_cc` control-character array. `c_cc` imports as
@@ -514,6 +542,7 @@ public final class TerminalIOHandler: IOHandler {
             // Clamp the scroll offset to the available history and write it
             // back so the editor's page math stays in range.
             let maxOffset = max(0, visual.count - bodyRows)
+            if !st.hasReadLine { st.scrollOffset = maxOffset }
             st.scrollOffset = min(st.scrollOffset, maxOffset)
             let live = st.scrollOffset == 0
 
@@ -651,8 +680,21 @@ public final class TerminalIOHandler: IOHandler {
 
     // MARK: - Ctrl-C confirm
 
+    /// An empty filename answer uses the engine's existing cancellation path.
+    /// Discard partial input and queued paste commands along with the prompt.
+    private func cancelFilenamePrompt() -> Bool {
+        box.withLock { st in
+            guard st.completions.context == .filename else { return false }
+            st.input = ""
+            st.cursor = 0
+            st.pendingLines.removeAll()
+            st.scrollOffset = 0
+            return true
+        }
+    }
+
     /// Asks the player to confirm a Ctrl-C quit, reading keys until they answer.
-    /// `y` confirms; `n`, Enter, or any unrecognized key cancels; a second
+    /// `y` confirms; `n`, Enter, or Escape cancels; a second
     /// Ctrl-C or Ctrl-D confirms outright. Front-end only — the actual quit
     /// happens when `readLine` returns `.quit` and the REPL calls
     /// `GameWorld.requestQuit()`.
@@ -669,7 +711,7 @@ public final class TerminalIOHandler: IOHandler {
             switch key {
             case .interrupt, .eof:
                 return true  // a second Ctrl-C / Ctrl-D means business
-            case .enter:
+            case .enter, .escape:
                 return false  // bare Enter defaults to "no"
             case .character(let ch):
                 switch ch.lowercased() {
@@ -685,12 +727,10 @@ public final class TerminalIOHandler: IOHandler {
 
     // MARK: - Tab-completion
 
-    /// The result of a Tab-completion attempt: the new input line and caret, and
-    /// any candidate words to display when the prefix stays ambiguous.
+    /// The result of a Tab-completion attempt: the new input line and caret.
     struct CompletionOutcome: Equatable {
         var newInput: String
         var newCursor: Int
-        var listing: [String]
     }
 
     /// Completes the word ending at `cursor` against the pool its position and
@@ -698,7 +738,7 @@ public final class TerminalIOHandler: IOHandler {
     /// against save names; otherwise the first word completes against verbs and
     /// directions, and anything later against in-scope nouns and directions. A
     /// unique match is inserted with a trailing space; several matches extend to
-    /// their longest common prefix, and are listed when they can't be extended
+    /// their longest common prefix, with no list when they can't be extended
     /// further. Text to the right of the caret is preserved. Pure — unit-tested
     /// directly.
     ///
@@ -706,13 +746,13 @@ public final class TerminalIOHandler: IOHandler {
     ///   - input: the current line being edited.
     ///   - cursor: the caret's character offset into `input`.
     ///   - candidates: the words available to complete against.
-    /// - Returns: the resulting line, caret, and any candidates to list.
+    /// - Returns: the resulting line and caret.
     static func complete(
         input: String, cursor: Int, candidates: CompletionCandidates
     ) -> CompletionOutcome {
         let chars = Array(input)
         let caret = max(0, min(cursor, chars.count))
-        let unchanged = CompletionOutcome(newInput: input, newCursor: cursor, listing: [])
+        let unchanged = CompletionOutcome(newInput: input, newCursor: cursor)
 
         // The partial word: the run of non-spaces ending at the caret.
         var wordStart = caret
@@ -735,7 +775,6 @@ public final class TerminalIOHandler: IOHandler {
         guard !matches.isEmpty else { return unchanged }
 
         let replacement: String
-        var listing: [String] = []
         if matches.count == 1 {
             replacement = matches[0] + " "
         } else {
@@ -743,16 +782,14 @@ public final class TerminalIOHandler: IOHandler {
             if lcp.count > lowered.count {
                 replacement = lcp  // extend as far as they agree
             } else {
-                replacement = partial  // no progress; leave as typed and list
-                listing = matches
+                replacement = partial  // no progress; leave as typed
             }
         }
 
         let suffix = String(chars[caret...])
         return CompletionOutcome(
             newInput: prefix + replacement + suffix,
-            newCursor: wordStart + replacement.count,
-            listing: listing)
+            newCursor: wordStart + replacement.count)
     }
 
     /// Picks the completion pool: save names when the engine is awaiting a
@@ -781,11 +818,6 @@ public final class TerminalIOHandler: IOHandler {
             }
         }
         return prefix
-    }
-
-    /// Formats ambiguous candidate words into one transcript line.
-    private static func formatCandidateListing(_ candidates: [String]) -> String {
-        candidates.joined(separator: "   ")
     }
 
     // MARK: - Bracketed paste

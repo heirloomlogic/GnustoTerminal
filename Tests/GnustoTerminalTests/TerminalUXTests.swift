@@ -27,7 +27,6 @@ struct TerminalUXTests {
             input: "exa", cursor: 3, candidates: candidates)
         #expect(out.newInput == "examine ")  // unique → trailing space
         #expect(out.newCursor == 8)
-        #expect(out.listing.isEmpty)
     }
 
     @Test func firstWordCompletesAgainstADirection() {
@@ -44,16 +43,14 @@ struct TerminalUXTests {
             input: "no", cursor: 2, candidates: candidates)
         #expect(out.newInput == "north")  // extended, no trailing space
         #expect(out.newCursor == 5)
-        #expect(out.listing.isEmpty)
     }
 
-    @Test func ambiguousWithNoCommonExtensionListsCandidates() {
+    @Test func ambiguousWithNoCommonExtensionLeavesInputAlone() {
         // "s" matches the verb "save" and directions "s"/"south": the common
-        // prefix is just "s" (no progress), so the candidates are listed.
+        // prefix is just "s" (no progress), so nothing is inserted or listed.
         let out = TerminalIOHandler.complete(
             input: "s", cursor: 1, candidates: candidates)
         #expect(out.newInput == "s")  // unchanged
-        #expect(out.listing == ["s", "save", "south"])
     }
 
     @Test func filenamePromptCompletesAgainstSaveNamesUniquely() {
@@ -64,12 +61,23 @@ struct TerminalUXTests {
         #expect(out.newCursor == 7)
     }
 
-    @Test func filenamePromptListsAmbiguousSaveNames() {
+    @Test func filenamePromptLeavesAmbiguousSaveNamesAlone() {
         // "s" matches spring and summer, common prefix "s" (no progress).
         let out = TerminalIOHandler.complete(
             input: "s", cursor: 1, candidates: filenameCandidates)
         #expect(out.newInput == "s")
-        #expect(out.listing == ["spring", "summer"])
+    }
+
+    @Test(arguments: [
+        ("s", "s"), ("so", "south"), ("south", "south"), ("southe", "southeast "),
+    ])
+    func southDirectionsExtendOnlyUntilTheNextFork(input: String, expected: String) {
+        let out = TerminalIOHandler.complete(
+            input: input, cursor: input.count,
+            candidates: CompletionCandidates(
+                verbs: ["save"], directions: ["s", "south", "southeast", "southwest"]))
+        #expect(out.newInput == expected)
+        #expect(out.newCursor == expected.count)
     }
 
     @Test func filenamePromptIgnoresVerbsAndNouns() {
@@ -78,7 +86,6 @@ struct TerminalUXTests {
         let out = TerminalIOHandler.complete(
             input: "b", cursor: 1, candidates: filenameCandidates)
         #expect(out.newInput == "b")
-        #expect(out.listing.isEmpty)
     }
 
     @Test func laterWordCompletesAgainstInScopeNouns() {
@@ -114,7 +121,6 @@ struct TerminalUXTests {
             input: "xyz", cursor: 3, candidates: candidates)
         #expect(out.newInput == "xyz")
         #expect(out.newCursor == 3)
-        #expect(out.listing.isEmpty)
     }
 
     @Test func emptyPartialIsANoOp() {
@@ -122,14 +128,12 @@ struct TerminalUXTests {
         let out = TerminalIOHandler.complete(
             input: "take ", cursor: 5, candidates: candidates)
         #expect(out.newInput == "take ")
-        #expect(out.listing.isEmpty)
     }
 
     @Test func emptyPoolIsANoOp() {
         let out = TerminalIOHandler.complete(
             input: "sav xy", cursor: 6, candidates: CompletionCandidates())
         #expect(out.newInput == "sav xy")
-        #expect(out.listing.isEmpty)
     }
 
     // MARK: - wordBackward / wordForward: the pure word-boundary logic
